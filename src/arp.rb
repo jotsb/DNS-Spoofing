@@ -5,7 +5,7 @@
 #
 # ARP Spoofing Class
 #
-# Author: Jivanjot Brar & Shan Bains
+# Author: Jot Brar & Shan Bains
 #
 # Functions:
 # initialize - initialize the class
